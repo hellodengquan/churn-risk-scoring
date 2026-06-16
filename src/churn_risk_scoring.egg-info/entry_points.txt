@@ -1,0 +1,2 @@
+[console_scripts]
+churn-score = churn_risk.cli:app

@@ -1,0 +1,18 @@
+weights:
+  login_frequency_30d: 0.15
+  login_trend: 0.10
+  recency: 0.20
+  transaction_frequency: 0.15
+  transaction_amount: 0.10
+  engagement_depth: 0.08
+  support_tickets: 0.07
+  payment_issues: 0.10
+  email_engagement: 0.05
+
+risk_thresholds:
+  low: 30.0
+  medium: 60.0
+  high: 80.0
+  critical: 95.0
+
+feature_ranges: {}

@@ -1,0 +1,9 @@
+Metadata-Version: 2.4
+Name: churn-risk-scoring
+Version: 0.1.0
+Summary: Customer churn risk scoring CLI tool
+Requires-Python: >=3.9
+Requires-Dist: typer>=0.9.0
+Requires-Dist: pandas>=2.0.0
+Requires-Dist: pyyaml>=6.0
+Requires-Dist: rich>=13.0.0

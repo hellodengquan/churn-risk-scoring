@@ -1,0 +1,164 @@
+[
+  {
+    "account_id": "ACC004",
+    "total_score": 85.59,
+    "risk_level": "high",
+    "risk_level_label": "高风险",
+    "risk_percentile": 5.0,
+    "feature_scores": {
+      "login_frequency_30d": 93.33,
+      "login_trend": 100.0,
+      "recency": 41.67,
+      "transaction_frequency": 100.0,
+      "transaction_amount": 99.4,
+      "engagement_depth": 84.55,
+      "support_tickets": 100.0,
+      "payment_issues": 100.0,
+      "email_engagement": 91.11
+    }
+  },
+  {
+    "account_id": "ACC008",
+    "total_score": 84.61,
+    "risk_level": "high",
+    "risk_level_label": "高风险",
+    "risk_percentile": 10.0,
+    "feature_scores": {
+      "login_frequency_30d": 96.67,
+      "login_trend": 100.0,
+      "recency": 66.67,
+      "transaction_frequency": 100.0,
+      "transaction_amount": 100.0,
+      "engagement_depth": 90.91,
+      "support_tickets": 42.86,
+      "payment_issues": 66.67,
+      "email_engagement": 96.67
+    }
+  },
+  {
+    "account_id": "ACC015",
+    "total_score": 77.33,
+    "risk_level": "high",
+    "risk_level_label": "高风险",
+    "risk_percentile": 15.0,
+    "feature_scores": {
+      "login_frequency_30d": 100.0,
+      "login_trend": 0.0,
+      "recency": 100.0,
+      "transaction_frequency": 100.0,
+      "transaction_amount": 100.0,
+      "engagement_depth": 100.0,
+      "support_tickets": 14.29,
+      "payment_issues": 33.33,
+      "email_engagement": 100.0
+    }
+  },
+  {
+    "account_id": "ACC011",
+    "total_score": 67.06,
+    "risk_level": "medium",
+    "risk_level_label": "中风险",
+    "risk_percentile": 20.0,
+    "feature_scores": {
+      "login_frequency_30d": 90.0,
+      "login_trend": 0.0,
+      "recency": 30.0,
+      "transaction_frequency": 95.0,
+      "transaction_amount": 98.2,
+      "engagement_depth": 81.82,
+      "support_tickets": 85.71,
+      "payment_issues": 66.67,
+      "email_engagement": 85.56
+    }
+  },
+  {
+    "account_id": "ACC017",
+    "total_score": 61.26,
+    "risk_level": "medium",
+    "risk_level_label": "中风险",
+    "risk_percentile": 25.0,
+    "feature_scores": {
+      "login_frequency_30d": 86.67,
+      "login_trend": 0.0,
+      "recency": 33.33,
+      "transaction_frequency": 95.0,
+      "transaction_amount": 97.6,
+      "engagement_depth": 78.18,
+      "support_tickets": 57.14,
+      "payment_issues": 33.33,
+      "email_engagement": 80.0
+    }
+  },
+  {
+    "account_id": "ACC003",
+    "total_score": 58.12,
+    "risk_level": "medium",
+    "risk_level_label": "中风险",
+    "risk_percentile": 30.0,
+    "feature_scores": {
+      "login_frequency_30d": 83.33,
+      "login_trend": 20.0,
+      "recency": 20.0,
+      "transaction_frequency": 90.0,
+      "transaction_amount": 95.2,
+      "engagement_depth": 72.73,
+      "support_tickets": 57.14,
+      "payment_issues": 33.33,
+      "email_engagement": 68.89
+    }
+  },
+  {
+    "account_id": "ACC014",
+    "total_score": 48.11,
+    "risk_level": "medium",
+    "risk_level_label": "中风险",
+    "risk_percentile": 35.0,
+    "feature_scores": {
+      "login_frequency_30d": 80.0,
+      "login_trend": 0.0,
+      "recency": 16.67,
+      "transaction_frequency": 90.0,
+      "transaction_amount": 92.8,
+      "engagement_depth": 67.27,
+      "support_tickets": 28.57,
+      "payment_issues": 0.0,
+      "email_engagement": 52.22
+    }
+  },
+  {
+    "account_id": "ACC007",
+    "total_score": 43.04,
+    "risk_level": "medium",
+    "risk_level_label": "中风险",
+    "risk_percentile": 40.0,
+    "feature_scores": {
+      "login_frequency_30d": 73.33,
+      "login_trend": 0.0,
+      "recency": 11.67,
+      "transaction_frequency": 85.0,
+      "transaction_amount": 88.8,
+      "engagement_depth": 62.73,
+      "support_tickets": 14.29,
+      "payment_issues": 0.0,
+      "email_engagement": 41.11
+    }
+  },
+  {
+    "account_id": "ACC020",
+    "total_score": 41.73,
+    "risk_level": "medium",
+    "risk_level_label": "中风险",
+    "risk_percentile": 45.0,
+    "feature_scores": {
+      "login_frequency_30d": 70.0,
+      "login_trend": 0.0,
+      "recency": 13.33,
+      "transaction_frequency": 80.0,
+      "transaction_amount": 87.2,
+      "engagement_depth": 56.36,
+      "support_tickets": 14.29,
+      "payment_issues": 0.0,
+      "email_engagement": 46.67
+    }
+  }
+]
