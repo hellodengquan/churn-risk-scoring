@@ -236,23 +236,23 @@ class AccountBehaviorDB:
 
         feature_jsons = [json.dumps(a.feature_usage_count, ensure_ascii=False) for a in accounts]
         rows = [
-            (
-                a.account_id,
-                a.login_count_last_30d,
-                a.login_count_last_7d,
-                a.last_login_days_ago,
-                a.total_transactions_last_30d,
-                a.total_transactions_last_90d,
-                a.transaction_amount_last_30d,
-                a.avg_session_minutes,
-                a.support_tickets_last_30d,
-                a.refund_count_last_90d,
-                a.payment_failures_last_30d,
-                feature_jsons[i],
-                a.email_open_rate,
-                a.subscription_age_days,
-                a.plan_level,
-            )
+            {
+                "account_id": a.account_id,
+                "login_count_last_30d": a.login_count_last_30d,
+                "login_count_last_7d": a.login_count_last_7d,
+                "last_login_days_ago": a.last_login_days_ago,
+                "total_transactions_last_30d": a.total_transactions_last_30d,
+                "total_transactions_last_90d": a.total_transactions_last_90d,
+                "transaction_amount_last_30d": a.transaction_amount_last_30d,
+                "avg_session_minutes": a.avg_session_minutes,
+                "support_tickets_last_30d": a.support_tickets_last_30d,
+                "refund_count_last_90d": a.refund_count_last_90d,
+                "payment_failures_last_30d": a.payment_failures_last_30d,
+                "feature_usage_count": feature_jsons[i],
+                "email_open_rate": a.email_open_rate,
+                "subscription_age_days": a.subscription_age_days,
+                "plan_level": a.plan_level,
+            }
             for i, a in enumerate(accounts)
         ]
 
@@ -268,7 +268,13 @@ class AccountBehaviorDB:
                         feature_usage_count, email_open_rate,
                         subscription_age_days, plan_level
                     ) VALUES (
-                        :1, :2, :3, :4, :5, :6, :7, :8, :9, :10, :11, :12, :13, :14, :15
+                        :account_id, :login_count_last_30d, :login_count_last_7d,
+                        :last_login_days_ago, :total_transactions_last_30d,
+                        :total_transactions_last_90d, :transaction_amount_last_30d,
+                        :avg_session_minutes, :support_tickets_last_30d,
+                        :refund_count_last_90d, :payment_failures_last_30d,
+                        :feature_usage_count, :email_open_rate,
+                        :subscription_age_days, :plan_level
                     )
                 """), rows)
             elif "postgres" in self.db_url or "postgresql" in self.db_url:

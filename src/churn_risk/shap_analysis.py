@@ -569,18 +569,171 @@ class SHAPLargeScaleSampler:
 
         return selected_accounts, report
 
-    @staticmethod
-    def adaptive_background_samples(
+    def find_optimal_k(
+        self,
         X: pd.DataFrame,
-        target: int = 100,
-        random_state: int = 42,
-    ) -> pd.DataFrame:
-        if len(X) <= target:
-            return X
+    ) -> Optional[AutoKMeansResult]:
+        if len(X) < self.config.k_min * 2:
+            return None
 
         try:
             from sklearn.cluster import KMeans
-            n_clusters = min(target, len(X) // 5, 50)
+            from sklearn.metrics import silhouette_score, calinski_harabasz_score
+        except ImportError:
+            return None
+
+        n_samples = len(X)
+        max_possible_k = min(
+            self.config.k_max,
+            n_samples // self.config.min_samples_per_cluster,
+            len(X) // 2,
+        )
+        if max_possible_k < self.config.k_min:
+            return None
+
+        k_range = list(range(self.config.k_min, max_possible_k + 1, self.config.k_step))
+        if not k_range:
+            return None
+
+        inertias = []
+        silhouette_scores = []
+        ch_scores = []
+        gap_scores = []
+        reference_inertias = []
+
+        for k in k_range:
+            kmeans = KMeans(n_clusters=k, random_state=self.config.random_state, n_init=3)
+            labels = kmeans.fit_predict(X.values)
+            inertias.append(kmeans.inertia_)
+
+            if k >= 2 and len(set(labels)) >= 2:
+                sil_score = silhouette_score(X.values, labels, random_state=self.config.random_state)
+                silhouette_scores.append(sil_score)
+                ch_score = calinski_harabasz_score(X.values, labels)
+                ch_scores.append(ch_score)
+            else:
+                silhouette_scores.append(-1.0)
+                ch_scores.append(0.0)
+
+            if self.config.use_gap_statistic:
+                ref_inertias = []
+                for _ in range(self.config.gap_bootstrap_samples):
+                    reference_dist = np.random.uniform(
+                        low=X.min().values,
+                        high=X.max().values,
+                        size=X.shape
+                    )
+                    ref_kmeans = KMeans(n_clusters=k, random_state=self.config.random_state, n_init=3)
+                    ref_kmeans.fit(reference_dist)
+                    ref_inertias.append(ref_kmeans.inertia_)
+                mean_ref_inertia = float(np.mean(ref_inertias))
+                reference_inertias.append(mean_ref_inertia)
+                log_inertia = np.log(kmeans.inertia_ + 1e-10)
+                log_ref = np.log(mean_ref_inertia + 1e-10)
+                gap_scores.append(log_ref - log_inertia)
+            else:
+                reference_inertias.append(0.0)
+                gap_scores.append(0.0)
+
+        scores = {}
+        for i, k in enumerate(k_range):
+            scores[k] = {
+                "inertia": float(inertias[i]),
+                "silhouette": float(silhouette_scores[i]),
+                "calinski_harabasz": float(ch_scores[i]),
+                "gap": float(gap_scores[i]) if self.config.use_gap_statistic else 0.0,
+                "reference_inertia": float(reference_inertias[i]),
+            }
+
+        elbow_point = None
+        if len(inertias) >= 3:
+            inertia_arr = np.array(inertias)
+            first_derivative = np.diff(inertia_arr)
+            second_derivative = np.diff(first_derivative)
+            if len(second_derivative) >= 1:
+                elbow_idx = int(np.argmax(second_derivative)) + 2
+                elbow_point = k_range[elbow_idx] if elbow_idx < len(k_range) else k_range[-1]
+
+        silhouette_best = None
+        valid_sil = [(i, s) for i, s in enumerate(silhouette_scores) if s > 0]
+        if valid_sil:
+            best_idx = max(valid_sil, key=lambda x: x[1])[0]
+            silhouette_best = k_range[best_idx]
+
+        ch_best = None
+        if ch_scores:
+            ch_arr = np.array(ch_scores)
+            ch_diff = np.diff(ch_arr)
+            if len(ch_diff) >= 1:
+                ch_changes = ch_diff[:-1] / (ch_diff[1:] + 1e-9)
+                ch_best_idx = int(np.argmax(ch_changes)) + 2 if len(ch_changes) >= 1 else np.argmax(ch_arr)
+                ch_best = k_range[min(ch_best_idx, len(k_range) - 1)]
+
+        gap_best = None
+        if self.config.use_gap_statistic and gap_scores:
+            gap_best_idx = int(np.argmax(gap_scores))
+            gap_best = k_range[gap_best_idx]
+
+        candidates = []
+        if elbow_point is not None:
+            candidates.append(elbow_point)
+        if silhouette_best is not None:
+            candidates.append(silhouette_best)
+        if ch_best is not None:
+            candidates.append(ch_best)
+        if gap_best is not None:
+            candidates.append(gap_best)
+
+        method_used = self.config.k_selection_method
+        if method_used == "elbow" and elbow_point is not None:
+            optimal_k = elbow_point
+        elif method_used == "silhouette" and silhouette_best is not None:
+            optimal_k = silhouette_best
+        elif method_used == "calinski_harabasz" and ch_best is not None:
+            optimal_k = ch_best
+        elif method_used == "gap" and gap_best is not None:
+            optimal_k = gap_best
+        elif method_used == "ensemble" and candidates:
+            from collections import Counter
+            counts = Counter(candidates)
+            optimal_k = counts.most_common(1)[0][0]
+        else:
+            optimal_k = elbow_point or silhouette_best or ch_best or k_range[len(k_range) // 2]
+            method_used = "fallback"
+
+        return AutoKMeansResult(
+            optimal_k=optimal_k,
+            scores=scores,
+            method_used=method_used,
+            elbow_point=elbow_point,
+            silhouette_best=silhouette_best,
+            ch_best=ch_best,
+            gap_best=gap_best,
+        )
+
+    def _adaptive_background_samples_internal(
+        self,
+        X: pd.DataFrame,
+        target: int = 100,
+        random_state: Optional[int] = None,
+    ) -> Tuple[pd.DataFrame, Optional[AutoKMeansResult]]:
+        if random_state is None:
+            random_state = self.config.random_state
+
+        if len(X) <= target:
+            return X, None
+
+        auto_result = None
+        n_clusters = min(target, len(X) // 5, 50)
+
+        if self.config.auto_kmeans and len(X) >= self.config.k_min * 2:
+            auto_result = self.find_optimal_k(X)
+            if auto_result is not None:
+                n_clusters = min(auto_result.optimal_k, target, len(X) // 2)
+                n_clusters = max(self.config.k_min, n_clusters)
+
+        try:
+            from sklearn.cluster import KMeans
             if n_clusters >= 2:
                 kmeans = KMeans(n_clusters=n_clusters, random_state=random_state, n_init=3)
                 labels = kmeans.fit_predict(X.values)
@@ -588,21 +741,40 @@ class SHAPLargeScaleSampler:
                 for cluster in range(n_clusters):
                     cluster_idx = np.where(labels == cluster)[0]
                     if len(cluster_idx) > 0:
-                        center_idx = cluster_idx[0]
-                        selected.append(center_idx)
+                        distances = np.sum((X.values[cluster_idx] - kmeans.cluster_centers_[cluster]) ** 2, axis=1)
+                        closest_idx = cluster_idx[np.argmin(distances)]
+                        selected.append(int(closest_idx))
                 remaining = [i for i in range(len(X)) if i not in selected]
                 fill = min(target - len(selected), len(remaining))
                 if fill > 0:
                     np.random.seed(random_state)
                     extra = np.random.choice(remaining, size=fill, replace=False)
                     selected.extend(extra.tolist())
-                return X.iloc[selected[:target]]
+                return X.iloc[selected[:target]], auto_result
         except Exception:
             pass
 
         np.random.seed(random_state)
         idx = np.random.choice(len(X), size=min(target, len(X)), replace=False)
-        return X.iloc[idx]
+        return X.iloc[idx], auto_result
+
+    def adaptive_background_samples_with_kmeans(
+        self,
+        X: pd.DataFrame,
+        target: int = 100,
+        random_state: Optional[int] = None,
+    ) -> Tuple[pd.DataFrame, Optional[AutoKMeansResult]]:
+        return self._adaptive_background_samples_internal(X, target, random_state)
+
+    @staticmethod
+    def adaptive_background_samples(
+        X: pd.DataFrame,
+        target: int = 100,
+        random_state: int = 42,
+    ) -> pd.DataFrame:
+        sampler = SHAPLargeScaleSampler(SHAPSamplingConfig(random_state=random_state))
+        result, _ = sampler._adaptive_background_samples_internal(X, target=target, random_state=random_state)
+        return result
 
 
 def format_sampling_report(report: SHAPSamplingReport) -> str:

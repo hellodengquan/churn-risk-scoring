@@ -147,12 +147,158 @@ def format_ranked_list(scores: List[RiskScore], max_items: Optional[int] = None)
 
 
 def get_terminal_width() -> int:
+    """
+    智能获取终端宽度，特别优化远端 SSH 终端场景
+    探测顺序:
+    1. COLUMNS 环境变量 (用户手动设置，优先级最高)
+    2. termios ioctl 系统调用 (最可靠的底层方法)
+    3. tput cols 命令 (SSH 终端通用)
+    4. stty size 命令 (备用方法)
+    5. shutil.get_terminal_size (Python 标准库)
+    6. 默认值 120
+    """
+    width_methods = []
+
+    try:
+        import os
+        columns_env = os.environ.get("COLUMNS")
+        if columns_env:
+            env_width = int(columns_env)
+            if 40 <= env_width <= 500:
+                width_methods.append(("env_columns", env_width))
+    except (ValueError, TypeError):
+        pass
+
+    try:
+        import fcntl
+        import termios
+        import struct
+        import sys
+
+        if hasattr(sys.stdout, "fileno"):
+            fd = sys.stdout.fileno()
+            if hasattr(termios, "TIOCGWINSZ") and hasattr(fcntl, "ioctl"):
+                try:
+                    winsize = fcntl.ioctl(fd, termios.TIOCGWINSZ, struct.pack("HHHH", 0, 0, 0, 0))
+                    _, ws_col, _, _ = struct.unpack("HHHH", winsize)
+                    if ws_col > 0 and 40 <= ws_col <= 500:
+                        width_methods.append(("termios_ioctl", int(ws_col)))
+                except (OSError, IOError):
+                    pass
+    except Exception:
+        pass
+
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["tput", "cols"],
+            capture_output=True,
+            text=True,
+            timeout=1,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            tput_width = int(result.stdout.strip())
+            if 40 <= tput_width <= 500:
+                width_methods.append(("tput_cols", tput_width))
+    except Exception:
+        pass
+
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["stty", "size"],
+            capture_output=True,
+            text=True,
+            timeout=1,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            parts = result.stdout.strip().split()
+            if len(parts) == 2:
+                stty_width = int(parts[1])
+                if 40 <= stty_width <= 500:
+                    width_methods.append(("stty_size", stty_width))
+    except Exception:
+        pass
+
     try:
         import shutil
         size = shutil.get_terminal_size((120, 40))
-        return int(size.columns)
+        shutil_width = int(size.columns)
+        if 40 <= shutil_width <= 500:
+            width_methods.append(("shutil", shutil_width))
     except Exception:
-        return 120
+        pass
+
+    if width_methods:
+        valid_widths = [w for _, w in width_methods if w > 0]
+        if valid_widths:
+            width_counts = {}
+            for w in valid_widths:
+                width_counts[w] = width_counts.get(w, 0) + 1
+            consensus_width = max(width_counts.items(), key=lambda x: x[1])
+            if consensus_width[1] >= 2:
+                return consensus_width[0]
+            return valid_widths[0]
+
+    return 120
+
+
+def detect_terminal_environment() -> Dict[str, Any]:
+    """
+    检测终端环境类型，用于自动优化输出格式
+    """
+    env_info: Dict[str, Any] = {
+        "is_ssh": False,
+        "is_tmux": False,
+        "is_screen": False,
+        "is_dumb": False,
+        "supports_color": True,
+        "terminal_type": "unknown",
+        "width": get_terminal_width(),
+    }
+
+    try:
+        import os
+        ssh_env = [
+            os.environ.get("SSH_CONNECTION"),
+            os.environ.get("SSH_CLIENT"),
+            os.environ.get("SSH_TTY"),
+        ]
+        if any(ssh_env):
+            env_info["is_ssh"] = True
+            env_info["terminal_type"] = "ssh"
+
+        if os.environ.get("TMUX"):
+            env_info["is_tmux"] = True
+            env_info["terminal_type"] = "tmux"
+        elif os.environ.get("STY"):
+            env_info["is_screen"] = True
+            env_info["terminal_type"] = "screen"
+
+        term = os.environ.get("TERM", "").lower()
+        if term == "dumb":
+            env_info["is_dumb"] = True
+            env_info["supports_color"] = False
+            env_info["terminal_type"] = "dumb"
+        elif "xterm" in term or "256color" in term:
+            env_info["supports_color"] = True
+            if env_info["terminal_type"] == "unknown":
+                env_info["terminal_type"] = term
+
+        if os.environ.get("NO_COLOR") or os.environ.get("TERM") == "dumb":
+            env_info["supports_color"] = False
+    except Exception:
+        pass
+
+    width = env_info["width"]
+    if width < 80:
+        env_info["display_mode"] = "narrow"
+    elif width < 120:
+        env_info["display_mode"] = "standard"
+    else:
+        env_info["display_mode"] = "wide"
+
+    return env_info
 
 
 def _truncate_text(text: str, max_len: int, ellipsis: str = "...") -> str:

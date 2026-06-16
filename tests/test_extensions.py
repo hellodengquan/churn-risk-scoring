@@ -979,3 +979,310 @@ def test_export_json_unicode(tmp_path):
     assert "테스트_계정_001" in content
     assert "프리미엄" in content
 
+
+class TestRTLCharacters(unittest.TestCase):
+    RTL_TEST_CASES = [
+        ("hebrew_basic", "מִשׁתַמֵשׁ", "希伯来语"),
+        ("hebrew_simple", "משתמש", "希伯来语简单"),
+        ("arabic_basic", "المستخدم", "阿拉伯语"),
+        ("arabic_with_diacritics", "المُسْتَخْدِم", "阿拉伯语变音符号"),
+        ("persian_farsi", "کاربر", "波斯语"),
+        ("urdu", "صارف", "乌尔都语"),
+        ("syriac", "ܡܫܬܡܫܐ", "叙利亚语"),
+        ("arabic_indic_numerals", "用户١٢٣", "阿拉伯-印度数字"),
+        ("hebrew_numerals", "אחדשניםשלשה", "希伯来语数字"),
+        ("mixed_ltr_rtl", "user_מִשׁתַמֵשׁ_test", "混合 LTR+RTL"),
+        ("mixed_rtl_ltr", "المستخدم_test_العربي", "混合 RTL+LTR"),
+        ("rtl_with_emoji", "מִשׁתַמֵשׁ🔥עברית", "RTL+表情"),
+        ("rtl_with_punctuation", "מִשׁתַמֵשׁ, עברית!", "RTL+标点"),
+        ("bidi_control_chars", "\u202Bמשתמש\u202Ctest", "双向控制字符"),
+        ("rtl_lro", "\u202Dמשתמשtest\u202C", "LRO 强制左到右"),
+        ("rtl_rlo", "\u202Etestמשתמש\u202C", "RLO 强制右到左"),
+        ("long_rtl_string", "المستخدم" * 5, "长 RTL 字符串"),
+        ("rtl_with_zwj", "👨‍👩‍👧‍👦_משתמש", "RTL+零宽连字符"),
+        ("rtl_with_newline", "משתמש\nעברית", "RTL+换行"),
+        ("rtl_account_id_complex", "מִשׁתַמֵשׁ_العربي_کاربر", "多语言 RTL"),
+    ]
+
+    BIDI_TEST_STRINGS = [
+        ("HelloשלוםWorld", "HelloשלוםWorld"),
+        ("العربيEnglishعربي", "العربيEnglishعربي"),
+        ("123עברית456", "123עברית456"),
+    ]
+
+    def test_rtl_account_behavior_creation(self):
+        """测试包含 RTL 字符的 AccountBehavior 创建"""
+        for test_name, account_id, description in self.RTL_TEST_CASES:
+            with self.subTest(test=test_name, description=description):
+                account = AccountBehavior(
+                    account_id=account_id,
+                    plan_level="פְרִימְיָם",
+                    login_count_last_30d=10,
+                    last_login_days_ago=5,
+                )
+                assert account.account_id == account_id
+                assert account.plan_level == "פְרִימְיָם"
+
+                utf8_encoded = account_id.encode("utf-8")
+                utf8_decoded = utf8_encoded.decode("utf-8")
+                assert utf8_decoded == account_id
+
+    def test_rtl_risk_score(self):
+        """测试包含 RTL 字符的 RiskScore 处理"""
+        for test_name, account_id, description in self.RTL_TEST_CASES[:10]:
+            with self.subTest(test=test_name):
+                score = RiskScore(
+                    account_id=account_id,
+                    total_score=75.5,
+                    feature_scores={},
+                    risk_level="high",
+                    risk_percentile=85.0,
+                    plan_level="عالي",
+                )
+                assert score.account_id == account_id
+                assert score.plan_level == "عالي"
+                assert score.risk_level == "high"
+
+                score_dict = asdict(score)
+                assert score_dict["account_id"] == account_id
+                assert score_dict["plan_level"] == "عالي"
+
+    def test_rtl_json_serialization(self):
+        """测试 RTL 字符的 JSON 序列化"""
+        rtl_accounts = [
+            AccountBehavior(
+                account_id="מִשׁתַמֵשׁ_001",
+                plan_level="פְרִימְיָם",
+                login_count_last_30d=10,
+                feature_usage_count={"תכונה_אחת": 5, "משתמש": 10},
+            ),
+            AccountBehavior(
+                account_id="المستخدم_002",
+                plan_level="بريميوم",
+                login_count_last_30d=5,
+                feature_usage_count={"الميزة_الاولى": 3},
+            ),
+            AccountBehavior(
+                account_id="کاربر_003",
+                plan_level="پریمیوم",
+                login_count_last_30d=8,
+                feature_usage_count={"ویژگی_اول": 7},
+            ),
+        ]
+
+        for account in rtl_accounts:
+            with self.subTest(account=account.account_id):
+                import json
+                data = asdict(account)
+                json_str = json.dumps(data, ensure_ascii=False)
+                loaded = json.loads(json_str)
+                assert loaded["account_id"] == account.account_id
+                assert loaded["plan_level"] == account.plan_level
+
+                json_str_ascii = json.dumps(data, ensure_ascii=True)
+                loaded_ascii = json.loads(json_str_ascii)
+                assert loaded_ascii["account_id"] == account.account_id
+
+    def test_rtl_csv_export(self, tmp_path=None):
+        """测试 RTL 字符的 CSV 导出"""
+        import tempfile
+        import os
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            output_file = os.path.join(tmp_dir, "rtl_test_output.csv")
+
+            rtl_accounts = [
+                AccountBehavior(account_id="מִשׁתַמֵשׁ_001", plan_level="פְרִימְיָם",
+                              login_count_last_30d=10, last_login_days_ago=3),
+                AccountBehavior(account_id="المستخدم_002", plan_level="بريميوم",
+                              login_count_last_30d=5, last_login_days_ago=7),
+                AccountBehavior(account_id="کاربر_003", plan_level="پریمیوم",
+                              login_count_last_30d=8, last_login_days_ago=2),
+            ]
+            scores = score_accounts(rtl_accounts, ScoringConfig())
+
+            export_to_csv(scores, output_file)
+
+            content = open(output_file, encoding="utf-8").read()
+
+            for acc in rtl_accounts:
+                assert acc.account_id in content
+                assert acc.plan_level in content
+
+            assert "account_id" in content
+            assert "total_score" in content
+
+    def test_rtl_bidi_text_preservation(self):
+        """测试双向文本（Bidi）的正确保留"""
+        for original, expected in self.BIDI_TEST_STRINGS:
+            with self.subTest(text=original):
+                account = AccountBehavior(
+                    account_id=original,
+                    login_count_last_30d=5,
+                )
+                assert account.account_id == expected
+
+                import json
+                data = asdict(account)
+                json_str = json.dumps(data, ensure_ascii=False)
+                loaded = json.loads(json_str)
+                assert loaded["account_id"] == expected
+
+    def test_rtl_string_operations(self):
+        """测试 RTL 字符串的各种操作"""
+        rtl_accounts = [
+            AccountBehavior(account_id="מִשׁתַמֵשׁ_A", login_count_last_30d=15, last_login_days_ago=2),
+            AccountBehavior(account_id="מִשׁתַמֵשׁ_B", login_count_last_30d=5, last_login_days_ago=10),
+            AccountBehavior(account_id="المستخدم_A", login_count_last_30d=20, last_login_days_ago=1),
+            AccountBehavior(account_id="المستخدم_B", login_count_last_30d=10, last_login_days_ago=5),
+        ]
+
+        scores = score_accounts(rtl_accounts, ScoringConfig())
+        assert len(scores) == 4
+
+        sorted_scores = sorted(scores, key=lambda s: s.account_id)
+        assert sorted_scores[0].account_id < sorted_scores[1].account_id
+        assert sorted_scores[2].account_id < sorted_scores[3].account_id
+
+    def test_rtl_truncation(self):
+        """测试 RTL 字符串截断处理"""
+        from churn_risk.output import _truncate_text
+
+        rtl_long_strings = [
+            "מִשׁתַמֵשׁ" * 10,
+            "المستخدم" * 10,
+            "mixed_" + "עברית" * 8 + "_ltr",
+        ]
+
+        for rtl_text in rtl_long_strings:
+            with self.subTest(length=len(rtl_text)):
+                truncated = _truncate_text(rtl_text, 20)
+                assert len(truncated) <= 20 + 3
+                assert truncated.endswith("...") or len(truncated) == len(rtl_text)
+
+                utf8_len = len(truncated.encode("utf-8"))
+                assert utf8_len > 0
+
+    def test_rtl_plan_level_boundaries(self):
+        """测试 RTL 字符作为 plan_level 的边界情况"""
+        rtl_plans = [
+            ("פְרִימְיָם", "希伯来语高级版"),
+            ("بريميوم", "阿拉伯语高级版"),
+            ("پریمیوم", "波斯语高级版"),
+            ("عادي", "阿拉伯语普通版"),
+            ("בָּסִיס", "希伯来语基础版"),
+        ]
+
+        for plan_name, description in rtl_plans:
+            with self.subTest(plan=plan_name, description=description):
+                account = AccountBehavior(
+                    account_id="TEST_RTL_001",
+                    plan_level=plan_name,
+                    login_count_last_30d=5,
+                )
+                assert account.plan_level == plan_name
+
+                utf8_bytes = plan_name.encode("utf-8")
+                decoded = utf8_bytes.decode("utf-8")
+                assert decoded == plan_name
+
+    def test_rtl_bidi_control_chars(self):
+        """测试包含双向控制字符的 RTL 文本处理"""
+        bidi_control_cases = [
+            ("\u202Bמשתמש\u202C", "RLE 包裹"),
+            ("\u202Dמשתמשtest\u202C", "LRO 强制 LTR"),
+            ("\u202Etestמשתמש\u202C", "RLO 强制 RTL"),
+            ("\u200Fמשתמש\u200Ftest", "RLM 标记"),
+            ("\u200Etest\u200Em�תמש", "LRM 标记"),
+        ]
+
+        for text, description in bidi_control_cases:
+            with self.subTest(desc=description):
+                account = AccountBehavior(
+                    account_id=text,
+                    login_count_last_30d=10,
+                )
+                assert account.account_id == text
+
+                import json
+                json_str = json.dumps({"id": text}, ensure_ascii=False)
+                loaded = json.loads(json_str)
+                assert loaded["id"] == text
+
+    def test_rtl_export_json(self, tmp_path=None):
+        """测试 RTL 字符的 JSON 导出"""
+        import tempfile
+        import os
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            output_file = os.path.join(tmp_dir, "rtl_json_output.json")
+
+            rtl_account = AccountBehavior(
+                account_id="מִשׁתַמֵשׁ_العربي_کاربر",
+                plan_level="פְרִימְיָם_بريميوم_پریمیوم",
+                login_count_last_30d=15,
+                last_login_days_ago=3,
+            )
+            scores = score_accounts([rtl_account], ScoringConfig())
+
+            export_to_json(scores, output_file)
+
+            content = open(output_file, encoding="utf-8").read()
+            assert "מִשׁתַמֵשׁ_العربي_کاربر" in content
+            assert "פְרִימְיָם_بريميوم_پریمیوم" in content
+
+            import json
+            data = json.loads(content)
+            assert isinstance(data, list)
+            assert data[0]["account_id"] == rtl_account.account_id
+            assert data[0]["plan_level"] == rtl_account.plan_level
+
+    def test_rtl_mixed_ltr_sorting(self):
+        """测试混合 LTR 和 RTL 字符串的排序"""
+        mixed_ids = [
+            "abc_עברית",
+            "עברית_abc",
+            "xyz_العربي",
+            "العربي_xyz",
+            "a_משתמש_b",
+        ]
+
+        accounts = [
+            AccountBehavior(account_id=uid, login_count_last_30d=10, last_login_days_ago=5)
+            for uid in mixed_ids
+        ]
+
+        scores = score_accounts(accounts, ScoringConfig())
+        sorted_ids = sorted([s.account_id for s in scores])
+        expected_sorted = sorted(mixed_ids)
+        assert sorted_ids == expected_sorted
+        assert len(sorted_ids) == len(mixed_ids)
+
+    def test_rtl_boundary_edge_cases(self):
+        """测试 RTL 字符的边界情况"""
+        edge_cases = [
+            ("", "空字符串"),
+            ("\u0590", "单个希伯来语字符"),
+            ("\u0600", "单个阿拉伯语字符"),
+            ("\u0590\u0600\u0750", "各 RTL 语系各一"),
+            ("a" * 100 + "עברית" * 10 + "z" * 100, "超长混合字符串"),
+            ("\u200E\u200F\u202A\u202B\u202C\u202D\u202E", "仅控制字符"),
+        ]
+
+        for text, description in edge_cases:
+            with self.subTest(desc=description):
+                account = AccountBehavior(
+                    account_id=text,
+                    login_count_last_30d=5,
+                )
+                assert account.account_id == text
+
+                encoded = text.encode("utf-8")
+                decoded = encoded.decode("utf-8")
+                assert decoded == text
+
+                import json
+                json_str = json.dumps({"id": text}, ensure_ascii=False)
+                loaded = json.loads(json_str)
+                assert loaded["id"] == text
+

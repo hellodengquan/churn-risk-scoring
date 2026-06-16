@@ -334,6 +334,23 @@ class ForecastingConfig:
     max_forecast_periods: int = 12
     cv_folds: int = 3
     use_volatility_threshold: float = 0.3
+    use_ensemble: bool = False
+    ensemble_method: str = "weighted_average"
+    ensemble_models: List[str] = field(default_factory=lambda: ["arima", "prophet", "linear"])
+    ensemble_weights: Optional[Dict[str, float]] = None
+    dynamic_weighting: bool = True
+    dynamic_weight_window: int = 10
+    bma_prior_strength: float = 1.0
+    ensemble_confidence_method: str = "conservative"
+    min_ensemble_models: int = 2
+
+
+@dataclass
+class EnsembleForecastDetail:
+    model_name: str
+    forecast_values: List[float]
+    weight: float
+    model_metrics: Dict[str, float]
 
 
 @dataclass
@@ -346,6 +363,7 @@ class ForecastingResult:
     model_metrics: Dict[str, float]
     trend_direction: str
     forecast_periods: int
+    ensemble_details: Optional[List[EnsembleForecastDetail]] = None
 
 
 class AutoForecaster:
@@ -635,6 +653,7 @@ class AutoForecaster:
         self,
         values: List[float],
         periods: Optional[int] = None,
+        use_ensemble: Optional[bool] = None,
     ) -> ForecastingResult:
         if periods is None:
             periods = self.config.min_forecast_periods
@@ -643,7 +662,14 @@ class AutoForecaster:
             min(self.config.max_forecast_periods, periods),
         )
 
+        if use_ensemble is None:
+            use_ensemble = self.config.use_ensemble
+
         characteristics = self._analyze_series_characteristics(values)
+
+        if use_ensemble:
+            return self._forecast_ensemble(values, periods, characteristics)
+
         model_name, reason = self._select_model(characteristics)
 
         if model_name == "prophet":
@@ -654,6 +680,197 @@ class AutoForecaster:
             result = self._forecast_linear(values, periods)
         result.selection_reason = reason
         return result
+
+    def _cross_validation_score(
+        self,
+        values: List[float],
+        model_name: str,
+        horizon: int = 3,
+    ) -> Dict[str, float]:
+        arr = np.array(values, dtype=float)
+        arr = arr[~np.isnan(arr)]
+        n = len(arr)
+
+        if n < self.config.min_samples_arima + horizon:
+            return {"mae": float('inf'), "rmse": float('inf'), "mape": float('inf')}
+
+        cv_errors = []
+        fold_size = n // self.config.cv_folds if self.config.cv_folds > 0 else n // 3
+        fold_size = max(fold_size, horizon + 5)
+
+        for fold in range(max(1, self.config.cv_folds)):
+            test_start = n - (fold + 1) * fold_size
+            if test_start < horizon + 5:
+                break
+            train_end = test_start
+            test_end = min(test_start + horizon, n)
+
+            train_data = list(arr[:train_end])
+            test_data = arr[test_start:test_end]
+
+            try:
+                if model_name == "arima":
+                    forecast = self._forecast_arima(train_data, len(test_data))
+                elif model_name == "prophet":
+                    forecast = self._forecast_prophet(train_data, len(test_data))
+                else:
+                    forecast = self._forecast_linear(train_data, len(test_data))
+
+                pred = np.array(forecast.forecast_values)
+                errors = np.abs(pred - test_data)
+                cv_errors.extend(errors.tolist())
+            except Exception:
+                continue
+
+        if not cv_errors:
+            return {"mae": float('inf'), "rmse": float('inf'), "mape": float('inf')}
+
+        cv_arr = np.array(cv_errors)
+        return {
+            "mae": float(np.mean(cv_arr)),
+            "rmse": float(np.sqrt(np.mean(cv_arr ** 2))),
+            "mape": float(np.mean(cv_arr / (np.abs(arr[-len(cv_arr):]) + 1e-9))) if len(arr) >= len(cv_arr) else 0.0,
+        }
+
+    def _calculate_dynamic_weights(
+        self,
+        values: List[float],
+        available_models: List[str],
+    ) -> Dict[str, float]:
+        if self.config.ensemble_weights and not self.config.dynamic_weighting:
+            return {m: self.config.ensemble_weights.get(m, 0.0) for m in available_models}
+
+        model_scores = {}
+        for model in available_models:
+            try:
+                scores = self._cross_validation_score(values, model)
+                if scores["mae"] == float('inf'):
+                    model_scores[model] = 0.0
+                    continue
+
+                weight = 1.0 / (scores["mae"] + 1e-9)
+                if self.config.ensemble_method == "bayesian":
+                    weight = np.exp(-self.config.bma_prior_strength * scores["rmse"])
+                model_scores[model] = weight
+            except Exception:
+                model_scores[model] = 0.0
+
+        total = sum(model_scores.values())
+        if total <= 0:
+            n = len(available_models)
+            return {m: 1.0 / n for m in available_models}
+
+        return {m: w / total for m, w in model_scores.items()}
+
+    def _forecast_ensemble(
+        self,
+        values: List[float],
+        periods: int,
+        characteristics: Dict[str, Any],
+    ) -> ForecastingResult:
+        available_models = [
+            m for m in self.config.ensemble_models
+            if m in self.available_models
+        ]
+
+        if len(available_models) < self.config.min_ensemble_models:
+            model_name, reason = self._select_model(characteristics)
+            if model_name == "prophet":
+                result = self._forecast_prophet(values, periods)
+            elif model_name == "arima":
+                result = self._forecast_arima(values, periods)
+            else:
+                result = self._forecast_linear(values, periods)
+            result.selection_reason = f"ensemble_not_enough_models_{len(available_models)}_" + reason
+            return result
+
+        weights = self._calculate_dynamic_weights(values, available_models)
+
+        individual_results = {}
+        for model in available_models:
+            try:
+                if model == "prophet":
+                    res = self._forecast_prophet(values, periods)
+                elif model == "arima":
+                    res = self._forecast_arima(values, periods)
+                else:
+                    res = self._forecast_linear(values, periods)
+                individual_results[model] = res
+            except Exception:
+                individual_results[model] = None
+
+        valid_results = {m: r for m, r in individual_results.items() if r is not None}
+        if not valid_results:
+            return self._forecast_linear(values, periods)
+
+        if len(valid_results) < len(available_models):
+            available_models = list(valid_results.keys())
+            weights = self._calculate_dynamic_weights(values, available_models)
+
+        n_periods = periods
+        ensemble_forecast = np.zeros(n_periods)
+        ensemble_lower = np.zeros(n_periods)
+        ensemble_upper = np.zeros(n_periods)
+        ensemble_details = []
+
+        for model in available_models:
+            res = valid_results[model]
+            w = weights.get(model, 0.0)
+            if w <= 0:
+                continue
+
+            forecasts = np.array(res.forecast_values)
+            lower = np.array(res.confidence_lower)
+            upper = np.array(res.confidence_upper)
+
+            if self.config.ensemble_method in ["simple_average", "weighted_average", "bayesian"]:
+                ensemble_forecast += forecasts * w
+                if self.config.ensemble_confidence_method == "conservative":
+                    ensemble_lower = np.minimum(ensemble_lower if np.any(ensemble_lower) else lower, lower)
+                    ensemble_upper = np.maximum(ensemble_upper if np.any(ensemble_upper) else upper, upper)
+                elif self.config.ensemble_confidence_method == "weighted":
+                    ensemble_lower += lower * w
+                    ensemble_upper += upper * w
+
+            ensemble_details.append(EnsembleForecastDetail(
+                model_name=model,
+                forecast_values=res.forecast_values,
+                weight=round(w, 4),
+                model_metrics=res.model_metrics,
+            ))
+
+        trend = characteristics.get("trend_direction", "稳定")
+        if isinstance(trend, (int, float)):
+            trend = "上升" if trend > 0.05 else "下降" if trend < -0.05 else "稳定"
+        else:
+            trend = str(trend)
+
+        model_metrics = {
+            "n_models": len(valid_results),
+            "ensemble_method": self.config.ensemble_method,
+            "dynamic_weighting": self.config.dynamic_weighting,
+        }
+        for m, w in weights.items():
+            model_metrics[f"weight_{m}"] = round(w, 4)
+
+        reason_parts = [
+            f"ensemble_{self.config.ensemble_method}",
+            f"models={','.join(available_models)}",
+        ]
+        if self.config.dynamic_weighting:
+            reason_parts.append("dynamic_weights")
+
+        return ForecastingResult(
+            model_used="ensemble",
+            selection_reason="; ".join(reason_parts),
+            forecast_values=[round(float(v), 4) for v in ensemble_forecast],
+            confidence_lower=[round(float(v), 4) for v in ensemble_lower],
+            confidence_upper=[round(float(v), 4) for v in ensemble_upper],
+            model_metrics=model_metrics,
+            trend_direction=trend,
+            forecast_periods=periods,
+            ensemble_details=ensemble_details,
+        )
 
     def batch_forecast(
         self,
