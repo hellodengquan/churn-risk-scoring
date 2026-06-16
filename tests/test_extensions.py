@@ -1,8 +1,13 @@
+import unittest
 import pytest
+from dataclasses import asdict
 from typing import List
+
+import pandas as pd
 
 from churn_risk.models import AccountBehavior, RiskScore, ScoringConfig
 from churn_risk.scoring import score_accounts
+from churn_risk.preprocessing import preprocess_pipeline
 from churn_risk.ltv import (
     calculate_ltv_for_account,
     assign_ltv_tiers,
@@ -11,24 +16,57 @@ from churn_risk.ltv import (
     calculate_monthly_revenue,
     calculate_historical_ltv,
     calculate_predicted_ltv,
+    LTVFallbackConfig,
+    LTVFallbackEstimator,
+    LTVFallbackResult,
+    calculate_ltv_with_fallback,
 )
-from churn_risk.shap_analysis import SHAPAnalyzer
+from churn_risk.shap_analysis import (
+    SHAPAnalyzer,
+    SHAPSamplingConfig,
+    SHAPLargeScaleSampler,
+    SHAPSamplingReport,
+    format_sampling_report,
+    _build_feature_frame,
+)
 from churn_risk.timeseries import (
     analyze_account_timeseries,
     get_portfolio_trend_summary,
     get_account_trend_summary,
     build_time_series_from_accounts,
     analyze_trend,
+    AutoForecaster,
+    ForecastingConfig,
+    ForecastingResult,
+    format_forecasting_report,
 )
-from churn_risk.data_source import AccountBehaviorDB, StreamProcessor
+from churn_risk.data_source import (
+    AccountBehaviorDB,
+    StreamProcessor,
+    create_data_source,
+    MongoDBSource,
+    ClickHouseSource,
+)
 from churn_risk.ml_weights import (
     WeightLearner,
     OnlineWeightAdjuster,
     train_weights_auto,
+    SGDWeightLearner,
+    ConceptDriftDetector,
+    DriftDetectionResult,
 )
 from churn_risk.visualization import (
     plot_risk_distribution,
     plot_score_histogram,
+)
+from churn_risk.output import (
+    export_to_csv,
+    export_to_json,
+    get_terminal_width,
+    _truncate_text,
+    build_rich_risk_tree,
+    build_rich_account_detail_tree,
+    print_terminal_width_info,
 )
 
 
@@ -436,3 +474,508 @@ class TestVisualization:
         output = tmp_path / "empty.png"
         result = plot_risk_distribution([], str(output))
         assert result in {True, False}
+
+
+class TestDataSourceAdapters(unittest.TestCase):
+    def test_create_data_source_sqlite(self):
+        source = create_data_source("sqlite", db_url="sqlite:///:memory:")
+        assert isinstance(source, AccountBehaviorDB)
+
+    def test_create_data_source_mongodb_available(self):
+        source = create_data_source("mongodb")
+        if source.available:
+            assert isinstance(source, MongoDBSource)
+        else:
+            assert isinstance(source, MongoDBSource)
+            assert source.available is False
+
+    def test_create_data_source_clickhouse_available(self):
+        source = create_data_source("clickhouse")
+        if source.available:
+            assert isinstance(source, ClickHouseSource)
+        else:
+            assert isinstance(source, ClickHouseSource)
+            assert source.available is False
+
+    def test_create_data_source_invalid(self):
+        with pytest.raises(ValueError, match="Unsupported data source type"):
+            create_data_source("unknown_db")
+
+    def test_mongodb_source_upsert_not_available(self):
+        source = MongoDBSource()
+        if not source.available:
+            with pytest.raises(ImportError, match="pymongo is required"):
+                source.upsert_account(_make_accounts(1)[0])
+
+    def test_clickhouse_source_not_available(self):
+        source = ClickHouseSource()
+        if not source.available:
+            with pytest.raises(ImportError, match="clickhouse-connect is required"):
+                source.upsert_account(_make_accounts(1)[0])
+
+
+class TestSGDConceptDrift(unittest.TestCase):
+    def test_sgd_learner_initialization(self):
+        learner = SGDWeightLearner()
+        assert learner.total_updates == 0
+        assert learner._model is None
+
+    def test_sgd_partial_fit_basic(self):
+        accounts = _make_accounts(15)
+        learner = SGDWeightLearner()
+        result = learner.partial_fit(accounts)
+        assert learner.total_updates == 1
+        assert result is None
+
+    def test_sgd_partial_fit_multiple_batches(self):
+        accounts = _make_accounts(15)
+        learner = SGDWeightLearner()
+        for i in range(5):
+            result = learner.partial_fit(accounts)
+        assert learner.total_updates == 5
+        assert isinstance(result, DriftDetectionResult)
+
+    def test_sgd_get_weights_untrained(self):
+        learner = SGDWeightLearner()
+        weights = learner.get_weights()
+        assert weights is not None
+        assert weights.recency > 0
+
+    def test_drift_detector_no_baseline(self):
+        detector = ConceptDriftDetector()
+        result = detector.detect()
+        assert result.is_drift is False
+        assert result.drift_type == "none"
+
+    def test_drift_detector_insufficient_data(self):
+        detector = ConceptDriftDetector()
+        features = pd.DataFrame({"f1": [1.0, 2.0]})
+        detector.set_baseline(features, 0.9)
+        for i in range(5):
+            detector.record({"f1": float(i)}, 0.5, float(i % 2))
+        result = detector.detect()
+        assert result.is_drift is False
+        assert "窗口数据不足" in result.message
+
+    def test_drift_detector_record(self):
+        detector = ConceptDriftDetector(window_size=10)
+        features = pd.DataFrame({"f1": [1.0, 2.0, 3.0, 4.0, 5.0]})
+        detector.set_baseline(features, 0.9)
+        for i in range(15):
+            detector.record({"f1": float(i)}, 0.5, float(i % 2))
+        assert len(detector._recent_predictions) <= 30
+        assert len(detector._recent_features) <= 30
+
+
+class TestLTVFallback(unittest.TestCase):
+    def test_fallback_config_default(self):
+        config = LTVFallbackConfig()
+        assert config.strategy == "plan_group_median"
+        assert config.knn_neighbors == 5
+
+    def test_fallback_estimator_no_reference(self):
+        estimator = LTVFallbackEstimator()
+        account = _make_accounts(1)[0]
+        result = estimator.estimate(account)
+        assert result.fallback_strategy_used == "conservative_default"
+        assert result.confidence == 0.15
+
+    def test_fallback_estimator_with_reference(self):
+        ref_accounts = _make_accounts(10)
+        ref_scores = score_accounts(ref_accounts, ScoringConfig())
+        ref_ltvs = [calculate_ltv_for_account(a, s) for a, s in zip(ref_accounts, ref_scores)]
+
+        estimator = LTVFallbackEstimator(ref_accounts, ref_ltvs)
+        missing_account = AccountBehavior(
+            account_id="NEW001",
+            subscription_age_days=1,
+            login_count_last_30d=0,
+            total_transactions_last_30d=0,
+            plan_level="basic",
+        )
+        result = estimator.estimate(missing_account)
+        assert result is not None
+        assert result.ltv_estimated > 0
+        assert result.monthly_revenue_estimated > 0
+
+    def test_calculate_ltv_with_fallback_mixed(self):
+        valid_accounts = _make_accounts(8)
+        missing_accounts = [
+            AccountBehavior(
+                account_id=f"MISS{i:03d}",
+                subscription_age_days=1,
+                login_count_last_30d=0,
+                total_transactions_last_30d=0,
+                plan_level="basic",
+            )
+            for i in range(3)
+        ]
+        all_accounts = valid_accounts + missing_accounts
+        scores = score_accounts(all_accounts, ScoringConfig())
+
+        ltvs, fallback = calculate_ltv_with_fallback(all_accounts, scores)
+        assert len(ltvs) == 11
+        assert len(fallback) == 3
+
+    def test_fallback_report_generation(self):
+        ref_accounts = _make_accounts(10)
+        ref_scores = score_accounts(ref_accounts, ScoringConfig())
+        ref_ltvs = [calculate_ltv_for_account(a, s) for a, s in zip(ref_accounts, ref_scores)]
+        estimator = LTVFallbackEstimator(ref_accounts, ref_ltvs)
+
+        results = estimator.batch_estimate(_make_accounts(5))
+        report = estimator.generate_fallback_report(results)
+        assert "兜底估算账号数: 5" in report
+        assert "平均置信度" in report
+
+
+class TestSHAPSampling(unittest.TestCase):
+    def test_sampler_config_default(self):
+        config = SHAPSamplingConfig()
+        assert config.max_samples == 500
+        assert config.strategy == "auto"
+
+    def test_sampler_small_dataset_full(self):
+        accounts = _make_accounts(50)
+        sampler = SHAPLargeScaleSampler()
+        sampled, report = sampler.sample(accounts)
+        assert len(sampled) == 50
+        assert report.strategy_used == "full"
+
+    def test_sampler_large_dataset_stratified(self):
+        accounts = _make_accounts(1000)
+        sampler = SHAPLargeScaleSampler()
+        sampled, report = sampler.sample(accounts)
+        assert len(sampled) == 500
+        assert report.strategy_used == "stratified"
+        assert report.sampling_ratio < 1.0
+
+    def test_sampler_very_large_importance_weighted(self):
+        accounts = _make_accounts(2000)
+        sampler = SHAPLargeScaleSampler()
+        sampled, report = sampler.sample(accounts)
+        assert len(sampled) == 500
+        assert report.strategy_used == "importance_weighted"
+        assert report.sampling_ratio < 1.0
+
+    def test_sampler_empty_dataset(self):
+        sampler = SHAPLargeScaleSampler()
+        sampled, report = sampler.sample([])
+        assert len(sampled) == 0
+        assert report.strategy_used == "empty"
+
+    def test_sampler_auto_select_strategy(self):
+        sampler = SHAPLargeScaleSampler()
+        assert sampler._auto_select_strategy(100) == "full"
+        assert sampler._auto_select_strategy(1000) == "stratified"
+        assert sampler._auto_select_strategy(2000) == "importance_weighted"
+        assert sampler._auto_select_strategy(500) == "full"
+        assert sampler._auto_select_strategy(501) == "stratified"
+
+    def test_adaptive_background_samples(self):
+        accounts = _make_accounts(200)
+        X = _build_feature_frame(accounts)
+        sampled = SHAPLargeScaleSampler.adaptive_background_samples(X, target=50)
+        assert len(sampled) <= 50
+
+    def test_sampling_report_format(self):
+        accounts = _make_accounts(200)
+        sampler = SHAPLargeScaleSampler()
+        _, report = sampler.sample(accounts)
+        formatted = format_sampling_report(report)
+        assert "总账号数: 200" in formatted
+        assert "采样策略" in formatted
+
+
+class TestAutoForecaster(unittest.TestCase):
+    def test_forecaster_available_models(self):
+        forecaster = AutoForecaster()
+        assert "linear" in forecaster.available_models
+
+    def test_forecaster_linear_short_series(self):
+        forecaster = AutoForecaster()
+        values = [1.0, 2.0, 3.0, 4.0, 5.0]
+        result = forecaster.forecast(values, periods=3)
+        assert result.model_used == "linear"
+        assert len(result.forecast_values) == 3
+        assert "样本数不足" in result.selection_reason
+
+    def test_forecaster_analyze_characteristics(self):
+        forecaster = AutoForecaster()
+        values = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]
+        chars = forecaster._analyze_series_characteristics(values)
+        assert chars["length"] == 10
+        assert chars["trend_strength"] > 0
+
+    def test_forecast_report_format(self):
+        forecaster = AutoForecaster()
+        values = [1.0, 2.0, 3.0, 4.0, 5.0]
+        result = forecaster.forecast(values, periods=2)
+        report = format_forecasting_report(result, "登录频次")
+        assert "时间序列预测报告" in report
+        assert "样本数不足" in report
+
+
+class TestRichTreeAdaptive(unittest.TestCase):
+    def test_get_terminal_width_default(self):
+        width = get_terminal_width()
+        assert isinstance(width, int)
+        assert width >= 80
+
+    def test_truncate_text(self):
+        assert _truncate_text("hello world", 8) == "hello..."
+        assert _truncate_text("hi", 8) == "hi"
+        assert _truncate_text("test", 3) == "tes"
+
+    def test_build_rich_tree_narrow(self):
+        accounts = _make_accounts(10)
+        scores = score_accounts(accounts, ScoringConfig())
+        tree = build_rich_risk_tree(scores, terminal_width=60)
+        assert tree is not None
+
+    def test_build_rich_tree_wide(self):
+        accounts = _make_accounts(10)
+        scores = score_accounts(accounts, ScoringConfig())
+        tree = build_rich_risk_tree(scores, terminal_width=150)
+        assert tree is not None
+
+    def test_build_account_detail_tree(self):
+        accounts = _make_accounts(1)
+        scores = score_accounts(accounts, ScoringConfig())
+        tree = build_rich_account_detail_tree(
+            accounts[0].account_id,
+            scores[0],
+            account=accounts[0],
+            terminal_width=120,
+        )
+        assert tree is not None
+
+    def test_terminal_width_info(self):
+        info = print_terminal_width_info()
+        assert "终端宽度" in info
+        assert "显示模式" in info
+
+
+class TestUnicodeFieldBoundaries(unittest.TestCase):
+    UNICODE_TEST_CASES = [
+        ("ascii_simple", "USER123", False),
+        ("chinese_chars", "用户_测试_账号", True),
+        ("japanese_chars", "ユーザー123", True),
+        ("korean_chars", "사용자테스트", True),
+        ("emoji_account", "user_🔥_test", True),
+        ("mixed_unicode", "用户_test_123", True),
+        ("empty_string", "", False),
+        ("special_ascii", "user@#$%", False),
+        ("unicode_control", "user\u0000test", True),
+        ("unicode_surrogate", "user𓀀test", True),
+        ("cyrillic", "пользователь", True),
+        ("arabic", "المستخدم", True),
+        ("devanagari", "उपयोगकर्ता", True),
+        ("combined_accents", "user_nm_aöe_ß", True),
+        ("right_to_left", "מִשׁתַמֵשׁ", True),
+        ("unicode_max_bmp", "user_" + "\uFFFF", True),
+        ("long_unicode", "测试账号_" * 10, True),
+        ("unicode_spaces", "user\u2003test", True),
+        ("unicode_zero_width", "user\u200Btest", True),
+        ("thai_chars", "ผู้ใช้", True),
+    ]
+
+    def test_account_behavior_unicode_account_id(self):
+        for test_name, account_id, has_unicode in self.UNICODE_TEST_CASES:
+            with self.subTest(test=test_name):
+                account = AccountBehavior(
+                    account_id=account_id,
+                    login_count_last_30d=10,
+                    last_login_days_ago=5,
+                )
+                assert account.account_id == account_id
+
+                if has_unicode:
+                    encoded = account_id.encode("utf-8")
+                    decoded = encoded.decode("utf-8")
+                    assert decoded == account_id
+
+    def test_plan_level_unicode_boundaries(self):
+        unicode_plans = [
+            ("基础版", True),
+            ("企业版_プレミアム", True),
+            ("enterprise", False),
+            ("프리미엄", True),
+            ("Базовый", True),
+        ]
+        for plan_name, has_unicode in unicode_plans:
+            with self.subTest(plan=plan_name):
+                account = AccountBehavior(
+                    account_id="TEST001",
+                    plan_level=plan_name,
+                    login_count_last_30d=5,
+                )
+                assert account.plan_level == plan_name
+
+    def test_json_serialization_unicode(self):
+        unicode_accounts = [
+            AccountBehavior(
+                account_id="账号_中文_001",
+                plan_level="基础版",
+                login_count_last_30d=10,
+                feature_usage_count={"feature_🔥": 5, "中文功能": 10},
+            ),
+            AccountBehavior(
+                account_id="ユーザー_002",
+                plan_level="プレミアム",
+                login_count_last_30d=5,
+                feature_usage_count={"機能_A": 3},
+            ),
+        ]
+        for account in unicode_accounts:
+            with self.subTest(account=account.account_id):
+                import json
+                data = asdict(account)
+                json_str = json.dumps(data, ensure_ascii=False)
+                loaded = json.loads(json_str)
+                assert loaded["account_id"] == account.account_id
+                assert loaded["plan_level"] == account.plan_level
+
+    def test_unicode_truncation_boundary(self):
+        long_unicode = "测试" * 50
+        truncated = _truncate_text(long_unicode, 20)
+        assert len(truncated) <= 20 + 3
+        assert truncated.endswith("...")
+
+    def test_feature_usage_count_unicode_keys(self):
+        unicode_features = {
+            "登录功能": 100,
+            "交易模块_💰": 50,
+            "サポート機能": 20,
+            "normal_feature": 80,
+        }
+        account = AccountBehavior(
+            account_id="TEST_UNICODE",
+            feature_usage_count=unicode_features,
+        )
+        for key, value in unicode_features.items():
+            assert account.feature_usage_count[key] == value
+
+    def test_risk_score_with_unicode(self):
+        unicode_ids = ["用户_001", "ユーザー_002", "사용자_003"]
+        accounts = [
+            AccountBehavior(account_id=uid, login_count_last_30d=5 + i, last_login_days_ago=2 + i)
+            for i, uid in enumerate(unicode_ids)
+        ]
+        scores = score_accounts(accounts, ScoringConfig())
+        assert len(scores) == 3
+        for uid in unicode_ids:
+            assert any(s.account_id == uid for s in scores)
+
+    def test_preprocessing_pipeline_unicode(self):
+        unicode_accounts = [
+            AccountBehavior(
+                account_id=f"账号{i:03d}_{'测试' * i}",
+                login_count_last_30d=10 + i,
+                last_login_days_ago=i + 1,
+                plan_level="基础版" if i % 2 == 0 else "premium",
+            )
+            for i in range(5)
+        ]
+        result = preprocess_pipeline(unicode_accounts)
+        assert len(result["processed_accounts"]) == 5
+
+    def test_database_roundtrip_unicode(self):
+        unicode_accounts = [
+            AccountBehavior(
+                account_id="中文_测试_" + str(i),
+                login_count_last_30d=10,
+                last_login_days_ago=5,
+                plan_level="企业版",
+            )
+            for i in range(3)
+        ]
+
+        db = AccountBehaviorDB("sqlite:///:memory:")
+        for acc in unicode_accounts:
+            db.upsert_account(acc)
+
+        loaded = db.load_all_accounts()
+        assert len(loaded) == 3
+        for orig in unicode_accounts:
+            found = [a for a in loaded if a.account_id == orig.account_id]
+            assert len(found) == 1
+            assert found[0].plan_level == orig.plan_level
+
+    def test_unicode_display_width_rich(self):
+        test_cases = [
+            ("short_ascii", 10, "USER001"),
+            ("chinese_6chars", 12, "测试账号测试"),
+            ("mixed_1", 11, "test_测试"),
+            ("emoji", 11, "test_🔥"),
+        ]
+        for name, expected_width, text in test_cases:
+            with self.subTest(test=name):
+                truncated = _truncate_text(text, 10)
+                assert len(truncated) <= 13
+
+    def test_utf8_encoding_boundary_values(self):
+        boundary_chars = [
+            "\u007F",
+            "\u0080",
+            "\u07FF",
+            "\u0800",
+            "\uFFFF",
+        ]
+        for char in boundary_chars:
+            with self.subTest(char_code=f"U+{ord(char):04X}"):
+                account_id = f"test_{char}_end"
+                account = AccountBehavior(account_id=account_id)
+                assert account.account_id == account_id
+
+    def test_unicode_sorting_stability(self):
+        unicode_ids = [
+            "用户_B",
+            "用户_A",
+            "USER_C",
+            "ユーザー_A",
+            "사용자_B",
+        ]
+        accounts = [
+            AccountBehavior(account_id=uid, login_count_last_30d=10, last_login_days_ago=5)
+            for uid in unicode_ids
+        ]
+        scores = score_accounts(accounts, ScoringConfig())
+        sorted_ids = sorted([s.account_id for s in scores])
+        assert len(sorted_ids) == 5
+        assert sorted_ids == sorted(unicode_ids)
+
+
+def test_export_csv_unicode(tmp_path):
+    unicode_account = AccountBehavior(
+        account_id="中文账号_001",
+        plan_level="企业版",
+        login_count_last_30d=15,
+        last_login_days_ago=3,
+    )
+    scores = score_accounts([unicode_account], ScoringConfig())
+
+    output_file = tmp_path / "unicode_output.csv"
+    export_to_csv(scores, str(output_file))
+
+    content = output_file.read_text(encoding="utf-8")
+    assert "中文账号_001" in content
+    assert "企业版" in content
+
+
+def test_export_json_unicode(tmp_path):
+    unicode_account = AccountBehavior(
+        account_id="테스트_계정_001",
+        plan_level="프리미엄",
+        login_count_last_30d=20,
+        last_login_days_ago=1,
+    )
+    scores = score_accounts([unicode_account], ScoringConfig())
+
+    output_file = tmp_path / "unicode_output.json"
+    export_to_json(scores, str(output_file))
+
+    content = output_file.read_text(encoding="utf-8")
+    assert "테스트_계정_001" in content
+    assert "프리미엄" in content
+

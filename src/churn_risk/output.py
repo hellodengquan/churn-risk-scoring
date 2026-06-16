@@ -1,9 +1,9 @@
 import csv
 import json
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import Any, Dict, List, Optional
 
-from .models import RiskScore
+from .models import AccountBehavior, RiskScore
 
 
 RISK_LEVEL_ORDER = ["critical", "high", "medium", "low"]
@@ -40,6 +40,7 @@ def export_to_csv(scores: List[RiskScore], output_path: str, include_features: b
 
     fieldnames = [
         "account_id",
+        "plan_level",
         "total_score",
         "risk_level",
         "risk_percentile",
@@ -56,6 +57,7 @@ def export_to_csv(scores: List[RiskScore], output_path: str, include_features: b
         for score in scores:
             row = {
                 "account_id": score.account_id,
+                "plan_level": score.plan_level,
                 "total_score": score.total_score,
                 "risk_level": RISK_LEVEL_LABELS.get(score.risk_level, score.risk_level),
                 "risk_percentile": score.risk_percentile,
@@ -73,6 +75,7 @@ def export_to_json(scores: List[RiskScore], output_path: str, indent: int = 2) -
     for score in scores:
         data.append({
             "account_id": score.account_id,
+            "plan_level": score.plan_level,
             "total_score": score.total_score,
             "risk_level": score.risk_level,
             "risk_level_label": RISK_LEVEL_LABELS.get(score.risk_level, score.risk_level),
@@ -141,3 +144,210 @@ def format_ranked_list(scores: List[RiskScore], max_items: Optional[int] = None)
         )
 
     return "\n".join(lines)
+
+
+def get_terminal_width() -> int:
+    try:
+        import shutil
+        size = shutil.get_terminal_size((120, 40))
+        return int(size.columns)
+    except Exception:
+        return 120
+
+
+def _truncate_text(text: str, max_len: int, ellipsis: str = "...") -> str:
+    if len(text) <= max_len:
+        return text
+    if max_len <= len(ellipsis):
+        return text[:max_len]
+    return text[:max_len - len(ellipsis)] + ellipsis
+
+
+def build_rich_risk_tree(
+    scores: List[RiskScore],
+    actions: Optional[List[Dict]] = None,
+    accounts: Optional[List[AccountBehavior]] = None,
+    terminal_width: Optional[int] = None,
+) -> "Table":
+    from rich.table import Table
+    from rich.tree import Tree
+    from rich.text import Text
+    from rich.panel import Panel
+    from rich import box
+
+    if terminal_width is None:
+        terminal_width = get_terminal_width()
+
+    use_wide_mode = terminal_width >= 120
+    account_id_width = min(25, max(15, terminal_width // 6))
+    action_width = min(60, max(25, terminal_width // 3)) if use_wide_mode else min(40, max(20, terminal_width // 3))
+
+    risk_color_map = {
+        "critical": "bold red",
+        "high": "bold orange3",
+        "medium": "bold yellow",
+        "low": "bold green",
+    }
+
+    action_map = {}
+    if actions:
+        action_map = {a["account_id"]: a for a in actions}
+
+    account_map = {}
+    if accounts:
+        account_map = {a.account_id: a for a in accounts}
+
+    groups = group_by_risk_level(scores)
+
+    root_label = Text("📊 客户流失风险分级清单", style="bold cyan")
+    if use_wide_mode:
+        root_label.append(f" (共 {len(scores)} 个账号)", style="dim")
+    tree = Tree(root_label)
+
+    for level in RISK_LEVEL_ORDER:
+        level_scores = groups.get(level, [])
+        if not level_scores:
+            continue
+
+        label = RISK_LEVEL_LABELS.get(level, level)
+        color = risk_color_map.get(level, "white")
+        count = len(level_scores)
+        pct = count / len(scores) * 100 if scores else 0
+
+        node_label = Text()
+        node_label.append(f"{'█' * int(pct / 5):<10s} ", style=color)
+        node_label.append(f"{label:<6s} ", style=f"bold {color}" if color != "white" else "bold")
+        node_label.append(f"{count:4d} 个 ", style="white")
+        node_label.append(f"({pct:5.1f}%)", style="dim")
+
+        node = tree.add(node_label)
+
+        display_count = min(10 if use_wide_mode else 5, len(level_scores))
+        for s in level_scores[:display_count]:
+            account_id = _truncate_text(s.account_id, account_id_width)
+
+            leaf_label = Text()
+            leaf_label.append(f"  {account_id:<{account_id_width + 2}s} ", style="white")
+            leaf_label.append(f"{s.total_score:>6.1f} 分", style=color)
+
+            if use_wide_mode and s.risk_percentile is not None:
+                leaf_label.append(f"  [前 {s.risk_percentile:>5.1f}%]", style="dim")
+
+            action = action_map.get(s.account_id)
+            if action and use_wide_mode:
+                action_text = _truncate_text(action.get("recommended_action", ""), action_width)
+                ltv_tier = action.get("ltv_tier", "")
+                if ltv_tier:
+                    tier_color = {
+                        "platinum": "bold magenta",
+                        "gold": "bold yellow",
+                        "silver": "bright_white",
+                        "bronze": "yellow",
+                    }.get(ltv_tier, "white")
+                    leaf_label.append(f"  [{ltv_tier.upper():<8s}]", style=tier_color)
+                leaf_label.append(f"  {action_text}", style="cyan")
+
+            node.add(leaf_label)
+
+        if len(level_scores) > display_count:
+            more_label = Text()
+            more_label.append(f"  ... 还有 {len(level_scores) - display_count} 个", style="dim")
+            node.add(more_label)
+
+    return tree
+
+
+def build_rich_account_detail_tree(
+    account_id: str,
+    score: RiskScore,
+    account: Optional[AccountBehavior] = None,
+    ltv: Optional[Any] = None,
+    shap_result: Optional[Any] = None,
+    trend_result: Optional[Dict] = None,
+    terminal_width: Optional[int] = None,
+) -> "Tree":
+    from rich.tree import Tree
+    from rich.text import Text
+    from rich import box
+
+    if terminal_width is None:
+        terminal_width = get_terminal_width()
+
+    use_wide_mode = terminal_width >= 100
+
+    risk_color_map = {
+        "critical": "bold red",
+        "high": "bold orange3",
+        "medium": "bold yellow",
+        "low": "bold green",
+    }
+    color = risk_color_map.get(score.risk_level, "white")
+
+    root_label = Text()
+    root_label.append(f"👤 账号详情: {account_id}", style="bold cyan")
+    risk_label = RISK_LEVEL_LABELS.get(score.risk_level, score.risk_level)
+    root_label.append(f"  [{risk_label}]", style=color)
+    root_label.append(f"  {score.total_score:.1f} 分", style="white")
+    root_label.append(f"  [前 {score.risk_percentile:.1f}%]", style="dim")
+
+    tree = Tree(root_label)
+
+    if account:
+        info_node = tree.add(Text("📋 基础信息", style="bold blue"))
+        info_node.add(f"  套餐等级: {account.plan_level}")
+        info_node.add(f"  订阅时长: {account.subscription_age_days} 天")
+        info_node.add(f"  最近登录: {account.last_login_days_ago} 天前")
+        info_node.add(f"  30天登录: {account.login_count_last_30d} 次")
+        info_node.add(f"  30天交易: {account.total_transactions_last_30d} 笔, ¥{account.transaction_amount_last_30d:,.2f}")
+
+    if score.feature_scores and use_wide_mode:
+        feat_node = tree.add(Text("📈 特征得分", style="bold blue"))
+        for feat_name, feat_score in sorted(score.feature_scores.items(), key=lambda x: -x[1]):
+            score_color = "red" if feat_score >= 70 else "yellow" if feat_score >= 40 else "green"
+            bar = "█" * int(feat_score / 5)
+            feat_node.add(
+                f"  {feat_name:<25s} [{bar:<20s}] {feat_score:>6.1f}",
+                style=score_color,
+            )
+
+    if ltv and hasattr(ltv, 'predicted_ltv'):
+        ltv_node = tree.add(Text("💰 LTV 信息", style="bold magenta"))
+        ltv_node.add(f"  预测 LTV: ¥{ltv.predicted_ltv:,.2f}")
+        ltv_node.add(f"  历史 LTV: ¥{ltv.historical_ltv:,.2f}")
+        ltv_node.add(f"  月收入: ¥{ltv.monthly_revenue:,.2f}")
+        ltv_node.add(f"  流失成本: ¥{ltv.churn_cost:,.2f}")
+        if hasattr(ltv, 'ltv_tier'):
+            ltv_node.add(f"  LTV 等级: {ltv.ltv_tier.upper()}")
+
+    if shap_result and hasattr(shap_result, 'top_positive_drivers'):
+        shap_node = tree.add(Text("🧠 SHAP 特征解释", style="bold purple"))
+        shap_node.add(f"  预测流失概率: {shap_result.predicted_score:.2%}")
+        pos_node = shap_node.add(Text("  ⚠️  增加流失风险:", style="red"))
+        for exp in shap_result.top_positive_drivers[:3]:
+            pos_node.add(
+                f"    {exp.feature_label}: {exp.shap_value:+.4f} (值: {exp.feature_value:.2f})"
+            )
+        neg_node = shap_node.add(Text("  ✅ 降低流失风险:", style="green"))
+        for exp in shap_result.top_negative_drivers[:3]:
+            neg_node.add(
+                f"    {exp.feature_label}: {exp.shap_value:+.4f} (值: {exp.feature_value:.2f})"
+            )
+
+    if trend_result:
+        trend_node = tree.add(Text("📉 趋势分析", style="bold yellow"))
+        overall = trend_result.get("overall_trend_risk", "unknown")
+        trend_color = "red" if overall == "high" else "yellow" if overall == "medium" else "green"
+        trend_node.add(f"  整体趋势风险: {overall}", style=trend_color)
+        trend_node.add(f"  告警数量: {trend_result.get('alert_count', 0)}")
+        trend_node.add(f"  下降指标数: {trend_result.get('declining_metrics', 0)}")
+        for alert in trend_result.get("active_alerts", [])[:3]:
+            trend_node.add(f"    ⚠ {alert['metric']}: {alert['message']}")
+
+    return tree
+
+
+def print_terminal_width_info() -> str:
+    width = get_terminal_width()
+    mode = "宽屏模式" if width >= 120 else "标准模式" if width >= 80 else "窄屏模式"
+    return f"终端宽度: {width} 列 | 显示模式: {mode}"
+

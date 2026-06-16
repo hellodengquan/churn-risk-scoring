@@ -42,6 +42,7 @@ class RiskScore:
     feature_scores: Dict[str, float]
     risk_level: str
     risk_percentile: float = 0.0
+    plan_level: Optional[str] = None
 
 
 @dataclass

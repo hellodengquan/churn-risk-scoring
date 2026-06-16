@@ -143,6 +143,7 @@ def _score_account(
         total_score=round(total_score, 2),
         feature_scores={k: round(v, 2) for k, v in feature_scores.items()},
         risk_level=risk_level,
+        plan_level=account.plan_level,
     )
 
 
