@@ -5,5 +5,14 @@ Summary: Customer churn risk scoring CLI tool
 Requires-Python: >=3.9
 Requires-Dist: typer>=0.9.0
 Requires-Dist: pandas>=2.0.0
+Requires-Dist: numpy>=1.24.0
 Requires-Dist: pyyaml>=6.0
 Requires-Dist: rich>=13.0.0
+Requires-Dist: scikit-learn>=1.3.0
+Requires-Dist: sqlalchemy>=2.0.0
+Requires-Dist: matplotlib>=3.7.0
+Requires-Dist: pytest>=7.4.0
+Provides-Extra: explain
+Requires-Dist: shap>=0.43.0; extra == "explain"
+Provides-Extra: all
+Requires-Dist: shap>=0.43.0; extra == "all"
