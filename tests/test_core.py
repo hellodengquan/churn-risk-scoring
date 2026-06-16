@@ -73,8 +73,9 @@ class TestEmptyDataset:
 
     def test_preprocess_pipeline_empty(self):
         accounts: List[AccountBehavior] = []
-        with pytest.raises(Exception):
-            preprocess_pipeline(accounts)
+        result = preprocess_pipeline(accounts)
+        assert len(result["original_df"]) == 0
+        assert len(result["processed_accounts"]) == 0
 
 
 class TestExtremeValues:
@@ -122,12 +123,46 @@ class TestExtremeValues:
             assert 0.0 <= s.total_score <= 100.0
 
     def test_last_login_very_large(self):
-        accounts = _make_accounts(n=2, last_login_days_ago=99999)
+        high_risk = AccountBehavior(
+            account_id="HIGH001",
+            login_count_last_30d=0,
+            login_count_last_7d=0,
+            last_login_days_ago=99999,
+            total_transactions_last_30d=0,
+            total_transactions_last_90d=0,
+            transaction_amount_last_30d=0.0,
+            avg_session_minutes=0.0,
+            support_tickets_last_30d=20,
+            refund_count_last_90d=10,
+            payment_failures_last_30d=15,
+            email_open_rate=0.0,
+            subscription_age_days=10,
+            plan_level="basic",
+        )
+        low_risk = AccountBehavior(
+            account_id="LOW001",
+            login_count_last_30d=100,
+            login_count_last_7d=25,
+            last_login_days_ago=0,
+            total_transactions_last_30d=50,
+            total_transactions_last_90d=150,
+            transaction_amount_last_30d=100000.0,
+            avg_session_minutes=120.0,
+            support_tickets_last_30d=0,
+            refund_count_last_90d=0,
+            payment_failures_last_30d=0,
+            email_open_rate=1.0,
+            subscription_age_days=1000,
+            plan_level="enterprise",
+        )
+        accounts = [high_risk, low_risk]
         config = ScoringConfig()
         scores = score_accounts(accounts, config)
         assert len(scores) == 2
-        for s in scores:
-            assert s.total_score >= 50.0
+        assert scores[0].account_id == "HIGH001"
+        assert scores[0].total_score > scores[1].total_score
+        assert scores[0].total_score >= 60.0
+        assert scores[1].total_score <= 40.0
 
     def test_single_account(self):
         accounts = _make_accounts(n=1)

@@ -1,0 +1,10 @@
+weights:
+  email_engagement: 0.0813
+  engagement_depth: 0.1149
+  login_frequency_30d: 0.2368
+  login_trend: 0.0
+  payment_issues: 0.0
+  recency: 0.1637
+  support_tickets: 0.0391
+  transaction_amount: 0.1619
+  transaction_frequency: 0.2023

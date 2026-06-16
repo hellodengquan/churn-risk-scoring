@@ -34,7 +34,9 @@ def plot_risk_distribution(
     colors = ["#dc3545", "#fd7e14", "#ffc107", "#28a745"]
 
     counts = [sum(1 for s in scores if s.risk_level == lvl) for lvl in levels]
-    total = sum(counts) if sum(counts) > 0 else 1
+    total = sum(counts)
+    if total == 0:
+        return False
     percentages = [c / total * 100 for c in counts]
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
@@ -76,6 +78,8 @@ def plot_score_histogram(
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 
     score_values = [s.total_score for s in scores]
+    if not score_values:
+        return False
 
     fig, ax = plt.subplots(figsize=(10, 6))
 

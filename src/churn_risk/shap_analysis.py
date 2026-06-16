@@ -126,7 +126,7 @@ class SHAPAnalyzer:
         self._ensure_explainer(X)
 
         if self.scaler is None:
-            return self._fallback_analysis(accounts, X)
+            return self._fallback_analysis(accounts, X, target_ids=target_account_ids)
 
         X_scaled = self.scaler.transform(X.values)
 
@@ -211,9 +211,15 @@ class SHAPAnalyzer:
             "login_trend": -0.01,
         }
 
+        filtered_indices = []
+        filtered_accounts = []
         for i, account in enumerate(accounts):
-            if target_ids and account.account_id not in target_ids:
-                continue
+            if target_ids is None or account.account_id in target_ids:
+                filtered_indices.append(i)
+                filtered_accounts.append(account)
+
+        for idx, account in zip(filtered_indices, filtered_accounts):
+            i = idx
 
             explanations = []
             total_contribution = 0.0

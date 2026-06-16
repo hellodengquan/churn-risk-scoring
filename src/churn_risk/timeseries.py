@@ -88,15 +88,15 @@ def _linear_regression_slope(values: List[float]) -> float:
 def analyze_trend(
     values: List[float],
     alert_threshold_pct: float = -20.0,
-) -> Tuple[str, float, float, float, str, bool]:
+) -> Tuple[str, float, float, float, str, bool, float]:
     if not values:
-        return "stable", 0.0, 0.0, 0.0, "", False
+        return "稳定", 0.0, 0.0, 0.0, "", False, 0.0
 
     values_arr = np.array(values, dtype=float)
     valid = values_arr[~np.isnan(values_arr)]
 
     if len(valid) < 2:
-        return "stable", 0.0, 0.0, float(values[-1]) if values else 0.0, "", False
+        return "稳定", 0.0, 0.0, 0.0, "", False, float(valid[-1]) if len(valid) > 0 else 0.0
 
     slope = _linear_regression_slope(list(valid))
 

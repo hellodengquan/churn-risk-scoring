@@ -216,11 +216,13 @@ class TestTimeSeries:
 
     def test_empty_trend(self):
         direction, slope_pct, volatility, change_pct, alert_msg, alert, forecast = analyze_trend([])
-        assert direction == "stable"
+        assert direction == "稳定"
+        assert alert == False
 
     def test_single_value_trend(self):
         direction, slope_pct, volatility, change_pct, alert_msg, alert, forecast = analyze_trend([5.0])
-        assert direction == "stable"
+        assert direction == "稳定"
+        assert alert == False
 
     def test_portfolio_timeseries(self):
         accounts = _make_accounts(10)
